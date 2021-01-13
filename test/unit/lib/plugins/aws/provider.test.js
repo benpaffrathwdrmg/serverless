@@ -1832,7 +1832,6 @@ describe('test/unit/lib/plugins/aws/provider.test.js', () => {
           'AWS',
           '--password',
           'dockerauthtoken',
-          proxyEndpoint,
         ]);
         expect(spawnExtStub).to.be.calledWith('docker', [
           'build',
