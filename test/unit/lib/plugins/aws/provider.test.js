@@ -1584,10 +1584,14 @@ describe('test/unit/lib/plugins/aws/provider.test.js', () => {
     });
 
     it('should fail if `functions[].image` references image from `provider.ecr.images` that has invalid path', async () => {
+      const modulesCacheStub = {
+        'child-process-ext/spawn': sinon.stub().resolves(),
+      };
       await expect(
         runServerless({
           fixture: 'ecr',
           cliArgs: ['package'],
+          modulesCacheStub,
           configExt: {
             provider: {
               ecr: {
@@ -1604,17 +1608,13 @@ describe('test/unit/lib/plugins/aws/provider.test.js', () => {
     });
 
     it('should fail if `functions[].image` references image not defined in `provider.ecr.images`', async () => {
-      const modulesCacheStub = {
-        'child-process-ext/spawn': sinon.stub().resolves(),
-      };
       await expect(
         runServerless({
           fixture: 'function',
           cliArgs: ['package'],
-          modulesCacheStub,
           configExt: {
             functions: {
-              fnProviderUndefinedImage: {
+              fnInvalid: {
                 image: 'undefinedimage',
               },
             },
@@ -1622,6 +1622,63 @@ describe('test/unit/lib/plugins/aws/provider.test.js', () => {
         })
       ).to.be.rejectedWith('Referenced "undefinedimage" not defined in "provider.ecr.images"');
     });
+
+    it('should fail if both uri and name is provided for an image', async () => {
+      const modulesCacheStub = {
+        'child-process-ext/spawn': sinon.stub().resolves(),
+      };
+      await expect(
+        runServerless({
+          fixture: 'ecr',
+          cliArgs: ['package'],
+          modulesCacheStub,
+          configExt: {
+            functions: {
+              foo: {
+                image: {
+                  name: 'baseimage',
+                  uri:
+                    '000000000000.dkr.ecr.sa-east-1.amazonaws.com/test-lambda-docker@sha256:6bb600b4d6e1d7cf521097177dd0c4e9ea373edb91984a505333be8ac9455d38',
+                },
+              },
+            },
+          },
+        })
+      ).to.be.eventually.rejected.and.have.property(
+        'code',
+        'FUNCTION_IMAGE_BOTH_URI_AND_NAME_DEFINED_ERROR'
+      );
+    });
+
+    it('should fail if neither uri nor name is provided for an image', async () => {
+      const modulesCacheStub = {
+        'child-process-ext/spawn': sinon.stub().resolves(),
+      };
+      await expect(
+        runServerless({
+          fixture: 'ecr',
+          cliArgs: ['package'],
+          modulesCacheStub,
+          configExt: {
+            functions: {
+              foo: {
+                image: {},
+              },
+            },
+          },
+        })
+      ).to.be.eventually.rejected.and.have.property(
+        'code',
+        'FUNCTION_IMAGE_NEITHER_URI_NOR_NAME_DEFINED_ERROR'
+      );
+    });
+
+    const findVersionCfConfig = (cfResources, fnLogicalId) =>
+      Object.values(cfResources).find(
+        (resource) =>
+          resource.Type === 'AWS::Lambda::Version' &&
+          resource.Properties.FunctionName.Ref === fnLogicalId
+      ).Properties;
 
     describe('with `functions[].image` referencing existing images', () => {
       let cfResources;
@@ -1659,6 +1716,11 @@ describe('test/unit/lib/plugins/aws/provider.test.js', () => {
               fnImageWithTag: {
                 image: '000000000000.dkr.ecr.sa-east-1.amazonaws.com/test-lambda-docker:stable',
               },
+              fnImageWithExplicitUri: {
+                image: {
+                  uri: imageWithSha,
+                },
+              },
               fnProviderImageWithExplicitUri: {
                 image: 'imagewithexplicituri',
               },
@@ -1674,7 +1736,7 @@ describe('test/unit/lib/plugins/aws/provider.test.js', () => {
         serviceConfig = fixtureData.serviceConfig;
       });
 
-      it('should support `functions[].image` with sha', () => {
+      it('should support `functions[].image` with implicit uri with sha', () => {
         const functionServiceConfig = serviceConfig.functions.fnImage;
         const functionCfLogicalId = naming.getLambdaLogicalId('fnImage');
         const functionCfConfig = cfResources[functionCfLogicalId].Properties;
@@ -1688,11 +1750,25 @@ describe('test/unit/lib/plugins/aws/provider.test.js', () => {
         );
         expect(imageDigest).to.match(/^sha256:[a-f0-9]{64}$/);
         const imageDigestSha = imageDigest.slice('sha256:'.length);
-        const versionCfConfig = Object.values(cfResources).find(
-          (resource) =>
-            resource.Type === 'AWS::Lambda::Version' &&
-            resource.Properties.FunctionName.Ref === functionCfLogicalId
-        ).Properties;
+        const versionCfConfig = findVersionCfConfig(cfResources, functionCfLogicalId);
+        expect(versionCfConfig.CodeSha256).to.equal(imageDigestSha);
+      });
+
+      it('should support `functions[].image` with explicit uri with sha', () => {
+        const functionServiceConfig = serviceConfig.functions.fnImageWithExplicitUri;
+        const functionCfLogicalId = naming.getLambdaLogicalId('fnImageWithExplicitUri');
+        const functionCfConfig = cfResources[functionCfLogicalId].Properties;
+
+        expect(functionCfConfig.Code).to.deep.equal({ ImageUri: functionServiceConfig.image.uri });
+        expect(functionCfConfig).to.not.have.property('Handler');
+        expect(functionCfConfig).to.not.have.property('Runtime');
+
+        const imageDigest = functionServiceConfig.image.uri.slice(
+          functionServiceConfig.image.uri.lastIndexOf('@') + 1
+        );
+        expect(imageDigest).to.match(/^sha256:[a-f0-9]{64}$/);
+        const imageDigestSha = imageDigest.slice('sha256:'.length);
+        const versionCfConfig = findVersionCfConfig(cfResources, functionCfLogicalId);
         expect(versionCfConfig.CodeSha256).to.equal(imageDigestSha);
       });
 
@@ -1707,11 +1783,7 @@ describe('test/unit/lib/plugins/aws/provider.test.js', () => {
         expect(functionCfConfig).to.not.have.property('Handler');
         expect(functionCfConfig).to.not.have.property('Runtime');
 
-        const versionCfConfig = Object.values(cfResources).find(
-          (resource) =>
-            resource.Type === 'AWS::Lambda::Version' &&
-            resource.Properties.FunctionName.Ref === functionCfLogicalId
-        ).Properties;
+        const versionCfConfig = findVersionCfConfig(cfResources, functionCfLogicalId);
         expect(versionCfConfig.CodeSha256).to.equal(imageDigestFromECR.slice('sha256:'.length));
       });
 
@@ -1725,11 +1797,7 @@ describe('test/unit/lib/plugins/aws/provider.test.js', () => {
         expect(functionCfConfig).to.not.have.property('Handler');
         expect(functionCfConfig).to.not.have.property('Runtime');
 
-        const versionCfConfig = Object.values(cfResources).find(
-          (resource) =>
-            resource.Type === 'AWS::Lambda::Version' &&
-            resource.Properties.FunctionName.Ref === functionCfLogicalId
-        ).Properties;
+        const versionCfConfig = findVersionCfConfig(cfResources, functionCfLogicalId);
         expect(versionCfConfig.CodeSha256).to.equal(imageSha);
       });
 
@@ -1743,11 +1811,7 @@ describe('test/unit/lib/plugins/aws/provider.test.js', () => {
         expect(functionCfConfig).to.not.have.property('Handler');
         expect(functionCfConfig).to.not.have.property('Runtime');
 
-        const versionCfConfig = Object.values(cfResources).find(
-          (resource) =>
-            resource.Type === 'AWS::Lambda::Version' &&
-            resource.Properties.FunctionName.Ref === functionCfLogicalId
-        ).Properties;
+        const versionCfConfig = findVersionCfConfig(cfResources, functionCfLogicalId);
         expect(versionCfConfig.CodeSha256).to.equal(imageSha);
       });
     });
@@ -1815,11 +1879,7 @@ describe('test/unit/lib/plugins/aws/provider.test.js', () => {
 
         const functionCfLogicalId = awsNaming.getLambdaLogicalId('foo');
         const functionCfConfig = cfTemplate.Resources[functionCfLogicalId].Properties;
-        const versionCfConfig = Object.values(cfTemplate.Resources).find(
-          (resource) =>
-            resource.Type === 'AWS::Lambda::Version' &&
-            resource.Properties.FunctionName.Ref === functionCfLogicalId
-        ).Properties;
+        const versionCfConfig = findVersionCfConfig(cfTemplate.Resources, functionCfLogicalId);
 
         expect(functionCfConfig.Code.ImageUri).to.deep.equal(`${repositoryUri}@sha256:${imageSha}`);
         expect(versionCfConfig.CodeSha256).to.equal(imageSha);
@@ -1869,11 +1929,7 @@ describe('test/unit/lib/plugins/aws/provider.test.js', () => {
 
         const functionCfLogicalId = awsNaming.getLambdaLogicalId('foo');
         const functionCfConfig = cfTemplate.Resources[functionCfLogicalId].Properties;
-        const versionCfConfig = Object.values(cfTemplate.Resources).find(
-          (resource) =>
-            resource.Type === 'AWS::Lambda::Version' &&
-            resource.Properties.FunctionName.Ref === functionCfLogicalId
-        ).Properties;
+        const versionCfConfig = findVersionCfConfig(cfTemplate.Resources, functionCfLogicalId);
 
         expect(functionCfConfig.Code.ImageUri).to.deep.equal(`${repositoryUri}@sha256:${imageSha}`);
         expect(versionCfConfig.CodeSha256).to.equal(imageSha);
@@ -1910,11 +1966,7 @@ describe('test/unit/lib/plugins/aws/provider.test.js', () => {
 
         const functionCfLogicalId = awsNaming.getLambdaLogicalId('foo');
         const functionCfConfig = cfTemplate.Resources[functionCfLogicalId].Properties;
-        const versionCfConfig = Object.values(cfTemplate.Resources).find(
-          (resource) =>
-            resource.Type === 'AWS::Lambda::Version' &&
-            resource.Properties.FunctionName.Ref === functionCfLogicalId
-        ).Properties;
+        const versionCfConfig = findVersionCfConfig(cfTemplate.Resources, functionCfLogicalId);
 
         expect(functionCfConfig.Code.ImageUri).to.deep.equal(`${repositoryUri}@sha256:${imageSha}`);
         expect(versionCfConfig.CodeSha256).to.equal(imageSha);
@@ -2019,6 +2071,47 @@ describe('test/unit/lib/plugins/aws/provider.test.js', () => {
         expect(versionCfConfig.CodeSha256).to.equal(imageSha);
         expect(describeRepositoriesStub).to.be.calledOnce;
         expect(createRepositoryStub.notCalled).to.be.true;
+      });
+
+      it('should work correctly when `functions[].image` is defined with explicit name', async () => {
+        const awsRequestStubMap = {
+          ...baseAwsRequestStubMap,
+          ECR: {
+            ...baseAwsRequestStubMap.ECR,
+            describeRepositories: describeRepositoriesStub.resolves({
+              repositories: [{ repositoryUri }],
+            }),
+            createRepository: createRepositoryStub,
+          },
+        };
+        const { awsNaming, cfTemplate } = await runServerless({
+          fixture: 'ecr',
+          cliArgs: ['package'],
+          awsRequestStubMap,
+          modulesCacheStub,
+          configExt: {
+            provider: {
+              ecr: {
+                images: {
+                  baseimage: './',
+                },
+              },
+            },
+            functions: {
+              foo: {
+                image: {
+                  name: 'baseimage',
+                },
+              },
+            },
+          },
+        });
+
+        const functionCfLogicalId = awsNaming.getLambdaLogicalId('foo');
+        const functionCfConfig = cfTemplate.Resources[functionCfLogicalId].Properties;
+        const versionCfConfig = findVersionCfConfig(cfTemplate.Resources, functionCfLogicalId);
+        expect(functionCfConfig.Code.ImageUri).to.deep.equal(`${repositoryUri}@sha256:${imageSha}`);
+        expect(versionCfConfig.CodeSha256).to.equal(imageSha);
       });
 
       it('should fail when docker command is not available', async () => {
