@@ -2205,7 +2205,7 @@ describe('lib/plugins/aws/package/compile/functions/index.test.js', () => {
     });
 
     it('should support `functions[].image` with image config properties', () => {
-      const functionCfLogicalId = naming.getLambdaLogicalId('fnWithImageConfig');
+      const functionCfLogicalId = naming.getLambdaLogicalId('fnImageWithConfig');
       const functionCfConfig = cfResources[functionCfLogicalId].Properties;
 
       expect(functionCfConfig.ImageConfig).to.deep.equal({
